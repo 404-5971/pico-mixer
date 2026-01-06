@@ -2,10 +2,16 @@
 #![no_main]
 
 use cortex_m_rt::entry;
-
 use panic_halt as _;
 use rotary_encoder_embedded::{Direction, RotaryEncoder};
-use rp_pico::hal::{clocks::init_clocks_and_plls, pac, sio::Sio, usb::UsbBus, watchdog::Watchdog};
+use rp_pico::hal::{
+    clocks::init_clocks_and_plls,
+    pac,
+    sio::Sio,
+    usb::UsbBus,
+    watchdog::Watchdog,
+    Timer, // <--- Import Timer
+};
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
@@ -15,7 +21,7 @@ fn main() -> ! {
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
     let sio = Sio::new(pac.SIO);
 
-    // 1. Clock Setup (Essential for USB)
+    // 1. Clock Setup
     let external_xtal_freq_hz = 12_000_000u32;
     let clocks = init_clocks_and_plls(
         external_xtal_freq_hz,
@@ -29,6 +35,9 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
+    // 2. Setup the Timer for debouncing
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+
     let pins = rp_pico::Pins::new(
         pac.IO_BANK0,
         pac.PADS_BANK0,
@@ -36,12 +45,12 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    // 2. Encoder Setup (DT=GP0, CLK=GP1)
+    // 3. Encoder Setup
     let rotary_dt = pins.gpio0.into_pull_up_input();
     let rotary_clk = pins.gpio1.into_pull_up_input();
     let mut encoder = RotaryEncoder::new(rotary_dt, rotary_clk).into_standard_mode();
 
-    // 3. USB Serial Setup
+    // 4. USB Setup
     let usb_bus = UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -57,39 +66,49 @@ fn main() -> ! {
             .product("Serial Port")
             .serial_number("TEST")])
         .unwrap()
-        .device_class(2) // CDC
+        .device_class(2)
         .build();
 
     let mut value = 0i32;
+    let mut last_turn_time = 0u64; // Track when the last valid turn happened
+    const DEBOUNCE_TIME_US: u64 = 50000;
 
     loop {
-        // 1. Always poll USB (to keep the connection alive)
-        // We don't care if it returns true or false here, just let it do its housekeeping.
         let _ = usb_dev.poll(&mut [&mut serial]);
 
-        // 2. Always poll the encoder
-        // This needs to run as fast as possible to catch the rotation.
-        match encoder.update() {
+        // Get the current direction
+        let dir = encoder.update();
+
+        // Check the current time (in microseconds)
+        let now = timer.get_counter().ticks();
+
+        match dir {
             Direction::Clockwise => {
-                value += 1;
-                // Optional: Check if we can write to avoid blocking,
-                // but for simple debugging this is fine.
-                let _ = serial.write(b"CW: ");
-                write_num(&mut serial, value);
-                let _ = serial.write(b"\r\n");
+                // DEBOUNCE: Only accept if 5ms (5000us) have passed since the last turn
+                if (now - last_turn_time) > DEBOUNCE_TIME_US {
+                    value += 1;
+                    let _ = serial.write(b"CW: ");
+                    write_num(&mut serial, value);
+                    let _ = serial.write(b"\r\n");
+
+                    last_turn_time = now; // Update timestamp
+                }
             }
             Direction::Anticlockwise => {
-                value -= 1;
-                let _ = serial.write(b"CCW: ");
-                write_num(&mut serial, value);
-                let _ = serial.write(b"\r\n");
+                if (now - last_turn_time) > DEBOUNCE_TIME_US {
+                    value -= 1;
+                    let _ = serial.write(b"CCW: ");
+                    write_num(&mut serial, value);
+                    let _ = serial.write(b"\r\n");
+
+                    last_turn_time = now;
+                }
             }
             Direction::None => {}
         }
     }
 }
 
-// Helper to write integers to serial
 fn write_num<B: usb_device::bus::UsbBus>(serial: &mut SerialPort<B>, num: i32) {
     let mut buffer = [0u8; 20];
     let mut n = num;
@@ -98,12 +117,10 @@ fn write_num<B: usb_device::bus::UsbBus>(serial: &mut SerialPort<B>, num: i32) {
     if is_neg {
         n = -n;
     }
-
     if n == 0 {
         let _ = serial.write(b"0");
         return;
     }
-
     while n > 0 {
         buffer[i] = (n % 10) as u8 + b'0';
         n /= 10;
