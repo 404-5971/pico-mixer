@@ -320,6 +320,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "panic-halt"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a513e167849a384b7f9b746e517604398518590a9142f4846a32e3c2a4de7b11"
+
+[[package]]
 name = "panic-probe"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,7 +351,9 @@ dependencies = [
  "defmt-rtt",
  "embedded-hal 1.0.0",
  "heapless 0.9.2",
+ "panic-halt",
  "panic-probe",
+ "rotary-encoder-embedded",
  "rp-pico",
  "usb-device",
  "usbd-serial",
@@ -413,6 +421,15 @@ name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+
+[[package]]
+name = "rotary-encoder-embedded"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f801548d2efd7c221eb504e544999150ebebda721ea87e9290a82e552ca03fc"
+dependencies = [
+ "embedded-hal 1.0.0",
+]
 
 [[package]]
 name = "rp-pico"

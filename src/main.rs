@@ -1,31 +1,21 @@
-//! Blinks the LED on a Pico board and creates a USB serial device.
-//!
-//! This will blink an LED attached to GP25 (or GPIO16) and create a USB serial port.
 #![no_std]
 #![no_main]
 
-use bsp::entry;
-use defmt::*;
-use defmt_rtt as _;
-use panic_probe as _;
+use cortex_m_rt::entry;
 
-// Provide an alias for our BSP so we can switch targets quickly.
-use rp_pico as bsp;
-
-use bsp::hal::{clocks::init_clocks_and_plls, pac, watchdog::Watchdog};
-
-use core::fmt::Write;
-use heapless::String;
+use panic_halt as _;
+use rotary_encoder_embedded::{Direction, RotaryEncoder};
+use rp_pico::hal::{clocks::init_clocks_and_plls, pac, sio::Sio, usb::UsbBus, watchdog::Watchdog};
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
 #[entry]
 fn main() -> ! {
-    info!("Program start");
     let mut pac = pac::Peripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
+    let sio = Sio::new(pac.SIO);
 
-    // External high-speed crystal on the pico board is 12Mhz
+    // 1. Clock Setup (Essential for USB)
     let external_xtal_freq_hz = 12_000_000u32;
     let clocks = init_clocks_and_plls(
         external_xtal_freq_hz,
@@ -39,8 +29,20 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
-    // Set up the USB driver
-    let usb_bus = UsbBusAllocator::new(bsp::hal::usb::UsbBus::new(
+    let pins = rp_pico::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
+
+    // 2. Encoder Setup (DT=GP0, CLK=GP1)
+    let rotary_dt = pins.gpio0.into_pull_up_input();
+    let rotary_clk = pins.gpio1.into_pull_up_input();
+    let mut encoder = RotaryEncoder::new(rotary_dt, rotary_clk).into_standard_mode();
+
+    // 3. USB Serial Setup
+    let usb_bus = UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
         clocks.usb_clock,
@@ -48,42 +50,69 @@ fn main() -> ! {
         &mut pac.RESETS,
     ));
 
-    // Set up the USB Serial Port
     let mut serial = SerialPort::new(&usb_bus);
-
-    // Set up the USB Device
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .device_class(2) // CDC class
+        .strings(&[StringDescriptors::default()
+            .manufacturer("Fake Corp")
+            .product("Serial Port")
+            .serial_number("TEST")])
+        .unwrap()
+        .device_class(2) // CDC
         .build();
 
-    let mut count = 0;
-    let mut index = 0;
+    let mut value = 0i32;
 
     loop {
-        // Poll the USB device
-        if usb_dev.poll(&mut [&mut serial]) {
-            let mut buf = [0u8; 64];
-            match serial.read(&mut buf) {
-                Ok(count) if count > 0 => {
-                    // Echo back
-                    let _ = serial.write(&buf[0..count]);
-                }
-                _ => {}
+        // 1. Always poll USB (to keep the connection alive)
+        // We don't care if it returns true or false here, just let it do its housekeeping.
+        let _ = usb_dev.poll(&mut [&mut serial]);
+
+        // 2. Always poll the encoder
+        // This needs to run as fast as possible to catch the rotation.
+        match encoder.update() {
+            Direction::Clockwise => {
+                value += 1;
+                // Optional: Check if we can write to avoid blocking,
+                // but for simple debugging this is fine.
+                let _ = serial.write(b"CW: ");
+                write_num(&mut serial, value);
+                let _ = serial.write(b"\r\n");
             }
+            Direction::Anticlockwise => {
+                value -= 1;
+                let _ = serial.write(b"CCW: ");
+                write_num(&mut serial, value);
+                let _ = serial.write(b"\r\n");
+            }
+            Direction::None => {}
         }
+    }
+}
 
-        // Blink LED and print to serial occasionally
-        // Note: This delay blocks the USB poll, so it's not ideal for a responsive USB device.
-        // For a real application, use a timer interrupt or non-blocking delay.
-        // However, for this simple example, we'll just poll in a tight loop and use a counter for timing.
+// Helper to write integers to serial
+fn write_num<B: usb_device::bus::UsbBus>(serial: &mut SerialPort<B>, num: i32) {
+    let mut buffer = [0u8; 20];
+    let mut n = num;
+    let mut i = 0;
+    let is_neg = n < 0;
+    if is_neg {
+        n = -n;
+    }
 
-        count += 1;
-        index += 1;
-        if count > 100000 {
-            count = 0;
-            let mut text: String<64> = String::new();
-            let _ = text.write_fmt(format_args!("Hello from pico index: {}\r\n", index));
-            let _ = serial.write(text.as_bytes());
-        }
+    if n == 0 {
+        let _ = serial.write(b"0");
+        return;
+    }
+
+    while n > 0 {
+        buffer[i] = (n % 10) as u8 + b'0';
+        n /= 10;
+        i += 1;
+    }
+    if is_neg {
+        let _ = serial.write(b"-");
+    }
+    for j in (0..i).rev() {
+        let _ = serial.write(&[buffer[j]]);
     }
 }
